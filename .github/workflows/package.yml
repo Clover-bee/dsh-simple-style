@@ -1,0 +1,50 @@
+# 校验插件源码 + 打包成 zip。
+# - push 到 main：产出 Actions artifact（保留 90 天）
+# - push v* tag：同样打包，并自动创建 Release、把 zip 挂成附件
+name: package
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Validate manifests and source
+        run: |
+          node -e "const fs=require('fs');for (const f of ['appearance-styles/package.json','appearance-styles/locale/zh.json','appearance-styles/locale/en.json']) { JSON.parse(fs.readFileSync(f,'utf8')); console.log('ok', f); }"
+          node --check appearance-styles/client.js
+          node --check appearance-styles/index.js
+
+      - name: Build zip
+        run: |
+          zip -r dsh-simple-style.zip appearance-styles README.md
+          unzip -l dsh-simple-style.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-simple-style
+          path: dsh-simple-style.zip
+          retention-days: 90
+
+      - name: Attach zip to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dsh-simple-style.zip
+          generate_release_notes: true

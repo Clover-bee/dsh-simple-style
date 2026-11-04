@@ -56,6 +56,22 @@ appearance-styles/
 └── icon.svg           # 侧边栏图标（调色盘 + 5 个色点）
 ```
 
+## 自动打包（GitHub Actions）
+
+工作流在 `.github/workflows/package.yml`，两条触发线：
+
+- **每次 push 到 `main`**：校验 `package.json` / locale JSON 可解析、`client.js` 与 `index.js` 语法通过，然后打包 `dsh-simple-style.zip`（含 `appearance-styles/` 与 `README.md`）并作为 **artifact** 上传，保留 90 天。下载路径：仓库 **Actions → 最新一次运行 → 页面底部 Artifacts → `dsh-simple-style`**。
+- **每次 push `v*` tag**：同一份 zip 会被挂到自动创建的 **Release** 上，附件不过期，适合长期留档。
+
+发版就是打 tag 并推送：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+zip 用于归档与分享；**安装仍然要目录**——解压后对 `appearance-styles/` 执行 `plugin_manager install_bundle`，或者直接 `git clone` 后安装。
+
 ## 自检
 
 ```bash
