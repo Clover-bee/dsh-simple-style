@@ -1,0 +1,3 @@
+- insert:
+    - id: appearance-styles
+      name: '@local/appearance-styles'

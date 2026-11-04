@@ -1,0 +1,15 @@
+# 开发期临时产物：调试脚本、截图、重建备份，不进仓库
+.tmp/
+.dsh/
+
+# 依赖目录（本地链接安装时会出现）
+node_modules/
+
+# 编辑事故/重建时留下的备份
+*.backup.js
+*.bak
+
+# 系统噪音
+.DS_Store
+Thumbs.db
+*.log
