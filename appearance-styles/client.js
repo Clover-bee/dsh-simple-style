@@ -989,6 +989,13 @@ body [data-sidebar-collapsed] [class*="sidebarCol"] [class*="panelRow"][class*="
   .das-card, .das-reset { transition: none !important; }
   .das-card:hover { transform: none; }
 }
+
+/* 视图钳制：网页壳最外层不关页面级滚动时，任何后代超出视口高度都会在窗口右缘
+   长出文档级滚动条（约 12~15px），它出现/消失时把整个界面横向挤动。聊天区自己
+   的滚动条用了 scrollbar-gutter:stable，恒定占位不抖；这里把 html/body 一并钳住，
+   只留内部滚动容器。打印时恢复，避免只打印出第一屏。 */
+html, body { overflow: hidden; height: 100%; }
+@media print { html, body { overflow: visible; height: auto; } }
 `;
 
 		// ------------------------------------------------------ 样式表生命周期
