@@ -997,24 +997,56 @@ body [data-sidebar-collapsed] [class*="sidebarCol"] [class*="panelRow"][class*="
 html, body { overflow: hidden; height: 100%; }
 @media print { html, body { overflow: visible; height: auto; } }
 
-/* 选中高亮动效：同组近距离滑动（View Transitions）、跨组或超距只淡入淡出。
-   两组各自一个 view-transition-name，靠 data-dsh-hl 属性挂在当前选中项上。 */
-[data-dsh-hl="nav"] { view-transition-name: dsh-hl-nav; }
-[data-dsh-hl="session"] { view-transition-name: dsh-hl-session; }
-[class*="panelRow"], [class*="sessionRow"] {
-  transition: background-color 200ms cubic-bezier(.22,.61,.36,1), box-shadow 200ms cubic-bezier(.22,.61,.36,1);
+/* 选中高亮：一层独立的滑块承载背景，只有它在组内位移；行本身不参与动画，
+   所以文字与图标不会跟着动。JS 装上后给 <html> 打 data-dsh-hl-ready，
+   这时才让宿主与本插件画在选中行上的底色让位给滑块，避免"双高亮"。 */
+.dsh-hl {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  border-radius: 10px;
+  pointer-events: none;
+  opacity: 0;
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, transparent);
+  box-shadow:
+    0 0 18px color-mix(in srgb, var(--dsw-alias-brand-primary) 16%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-brand-primary) 16%, transparent);
+  transition:
+    transform 200ms cubic-bezier(.22,.61,.36,1),
+    width 200ms cubic-bezier(.22,.61,.36,1),
+    height 200ms cubic-bezier(.22,.61,.36,1),
+    opacity 200ms ease;
+  will-change: transform;
 }
-/* 只让两组高亮做动效，页面其余部分不参与快照交叉淡入，避免整页闪一下。 */
-::view-transition-old(root), ::view-transition-new(root) { animation: none; }
-::view-transition-group(dsh-hl-nav), ::view-transition-group(dsh-hl-session) {
-  animation-duration: 200ms;
-  animation-timing-function: cubic-bezier(.22,.61,.36,1);
+.dsh-hl[data-hl-anim="none"] { transition: none !important; }
+.dsh-hl[data-deco="glow"]::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  width: 3px;
+  height: 16px;
+  margin-top: -8px;
+  border-radius: 1.5px;
+  background: var(--dsw-alias-brand-primary);
+}
+.dsh-hl[data-deco="outline"] {
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 5%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-brand-primary) 26%, transparent);
+}
+/* 滑块接管后，选中行自己不要再画底色/指示条/光晕。选择器要压过风格表里的 !important。 */
+html[data-dsh-hl-ready] body [class*="sidebarCol"] [class*="panelRow"][class*="panelActive"] {
+  background-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+}
+html[data-dsh-hl-ready] body [class*="sidebarCol"] [class*="sessionRow"][class*="selected"] {
+  background-color: transparent !important;
 }
 @media (prefers-reduced-motion: reduce) {
-  [class*="panelRow"], [class*="sessionRow"] { transition: none !important; }
-  ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) {
-    animation-duration: 1ms !important;
-  }
+  .dsh-hl { transition: none !important; }
 }
 `;
 
@@ -1080,11 +1112,19 @@ html, body { overflow: hidden; height: 100%; }
 			if (!style) {
 				activeId = null;
 				removeSheet(SHEET_STYLE);
+				try { document.body.removeAttribute(HL_DECO_ATTR); } catch (error) { /* 无 body 时忽略 */ }
 				if (remember) persist(null);
 				return null;
 			}
 
 			activeId = style.id;
+
+			// 高亮滑块按当前风格的装饰口径画（glow＝带左缘指示条；outline＝内描边）。
+			try {
+				document.body.setAttribute(HL_DECO_ATTR, style.deco === 'outline' ? 'outline' : 'glow');
+			} catch (error) {
+				/* 没有 body 时忽略 */
+			}
 
 			// 加固层：把别名令牌交给主题服务（inline 优先级最高，不怕宿主样式后到）。
 			if (themeService && typeof themeService.overrideTokens === 'function') {
@@ -1196,132 +1236,239 @@ html, body { overflow: hidden; height: 100%; }
 			);
 		}
 
-		// ------------------------------------------------- 选中高亮动效（同组滑动 / 跨组淡入）
-		// 两组各自一个 view-transition-name：nav＝全局面板导航，session＝工作区会话行。
-		// 只在"同组、且新旧选中行垂直距离 ≤ 240px"时才用 View Transitions 拦一次点击做位移
-		// morph；其余情况（跨组、超距、不支持 VT、减少动效）一律不拦，交给 CSS 的 200ms 淡入淡出。
-		const HL_ATTR = 'data-dsh-hl';
-		const HL_NAV_ROW = '[class*="sidebarCol"] [class*="panelList"] button[class*="panelRow"]';
-		const HL_SESSION_ROW = '[class*="sidebarCol"] [class*="regionArea"] [class*="sessionRow"]';
-		const HL_MAX_SLIDE = 240;
+		// ------------------------------------------------- 选中高亮：独立滑块层
+		// 关键点：高亮画在一层独立的 div.dsh-hl 上，只有它位移；行本身不参与动画，
+		// 所以文字/图标不会跟着动。两组各有一块滑块，互不干扰，因此不存在"跨组滑动"。
+		// - 同组、同一个容器内切换：滑块 200ms 平移 + 尺寸过渡（真正的"组内平滑位移"）；
+		// - 换容器（会话列表按工作区分段时）或首次出现：不做位移，淡入到位；
+		// - 滚动/窗口尺寸变化：无动画地跟随，避免拖影。
+		const HL_GROUP_NAV = 'nav';
+		const HL_GROUP_SESSION = 'session';
+		const HL_READY_ATTR = 'data-dsh-hl-ready';
+		const HL_DECO_ATTR = 'data-dsh-hl-deco';
+		const HL_NAV_ACTIVE = '[class*="sidebarCol"] [class*="panelList"] button[class*="panelActive"]';
+		const HL_SESSION_ACTIVE = '[class*="sidebarCol"] [class*="regionArea"] [class*="sessionRow"][class*="selected"]';
 
-		function hlGroupOf(row) {
-			if (!row || typeof row.matches !== 'function') return null;
-			if (row.matches(HL_NAV_ROW)) return 'nav';
-			if (row.matches(HL_SESSION_ROW)) return 'session';
-			return null;
-		}
-
-		function hlMotionEnabled() {
-			if (typeof document === 'undefined') return false;
-			if (typeof document.startViewTransition !== 'function') return false;
-			try {
-				if (typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches) return false;
-			} catch (error) {
-				/* matchMedia 不可用时按允许处理 */
-			}
-			return true;
-		}
-
-		function hlSlideDistanceOk(from, to) {
-			try {
-				const a = from.getBoundingClientRect();
-				const b = to.getBoundingClientRect();
-				const distance = Math.abs((a.top + a.height / 2) - (b.top + b.height / 2));
-				return Number.isFinite(distance) && distance <= HL_MAX_SLIDE;
-			} catch (error) {
-				return false;
-			}
+		function hlNum(value) {
+			const n = parseFloat(value);
+			return Number.isFinite(n) ? n : 0;
 		}
 
 		/**
-		 * 安装侧边栏选中高亮的过渡：
-		 * - 同组近距离：捕获阶段拦下 click，用 startViewTransition 包住宿主的状态更新再转发点击；
-		 * - 其余情况直接放行，由 CSS 过渡完成淡入淡出。
-		 * @param ctx - 插件上下文（只用 ctx.effect 管理生命周期）
+		 * 安装"侧边栏选中高亮滑块"。
+		 * @param ctx - 插件上下文（生命周期用 ctx.effect 管理）
 		 * @returns 清理函数
 		 */
-		function installHighlightMotion(ctx) {
-			if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') {
-				return () => {};
-			}
+		function installHighlightSlider(ctx) {
+			if (typeof document === 'undefined' || !document.documentElement) return () => {};
+			if (typeof document.addEventListener !== 'function') return () => {};
+			if (typeof document.createElement !== 'function') return () => {};
 
-			let replaying = false;
-			const marked = new Set();
-
-			const mark = (row, group) => {
-				if (!row || !group) return;
-				row.setAttribute(HL_ATTR, group);
-				marked.add(row);
+			const groups = {
+				[HL_GROUP_NAV]: { row: null, container: null, slider: null },
+				[HL_GROUP_SESSION]: { row: null, container: null, slider: null },
 			};
-			const unmark = (row) => {
-				if (!row) return;
-				row.removeAttribute(HL_ATTR);
-				marked.delete(row);
-			};
+			const touchedContainers = new Set();
+			let frame = 0;
+			let disposed = false;
 
-			// 启动时把当前选中项标好，否则第一次同组切换拿不到"旧位置"。
-			try {
-				const activeNav = document.querySelector(`${HL_NAV_ROW}[class*="panelActive"]`);
-				if (activeNav) mark(activeNav, 'nav');
-				const activeSession = document.querySelector(`${HL_SESSION_ROW}[class*="selected"]`);
-				if (activeSession) mark(activeSession, 'session');
-			} catch (error) {
-				/* 初始标记失败不影响点击 */
-			}
-
-			const onClick = (event) => {
-				if (replaying) return;
-				const target = event.target;
-				if (!target || typeof target.closest !== 'function') return;
-				const row = target.closest(`${HL_NAV_ROW}, ${HL_SESSION_ROW}`);
-				if (!row) return;
-				const group = hlGroupOf(row);
-				if (!group) return;
-
-				let prev = null;
+			const decoOf = () => {
 				try {
-					prev = document.querySelector(`[${HL_ATTR}="${group}"]`);
+					const value = document.body && document.body.getAttribute(HL_DECO_ATTR);
+					return value === 'outline' ? 'outline' : 'glow';
 				} catch (error) {
-					prev = null;
+					return 'glow';
 				}
-				if (prev === row) return; // 点的是当前项，无事可做
+			};
 
-				const canSlide = prev !== null && hlMotionEnabled() && hlSlideDistanceOk(prev, row);
-				if (!canSlide) {
-					// 跨组 / 超距 / 不支持 VT：放行点击，只更新标记，靠 CSS 淡入淡出。
-					mark(row, group);
+			const ensureContainer = (container) => {
+				if (!touchedContainers.has(container)) {
+					try {
+						const position = getComputedStyle(container).position;
+						if (!position || position === 'static') {
+							container.setAttribute('data-dsh-hl-pos', 'relative');
+							container.style.position = 'relative';
+						}
+					} catch (error) {
+						/* 取不到计算样式就按已有定位处理 */
+					}
+					touchedContainers.add(container);
+				}
+				return container;
+			};
+
+			const ensureSlider = (state, container) => {
+				if (state.slider && state.slider.parentNode === container) return state.slider;
+				const slider = document.createElement('div');
+				slider.className = 'dsh-hl';
+				slider.setAttribute('aria-hidden', 'true');
+				slider.setAttribute('data-deco', decoOf());
+				try {
+					container.insertBefore(slider, container.firstChild || null);
+				} catch (error) {
+					container.appendChild(slider);
+				}
+				state.slider = slider;
+				return slider;
+			};
+
+			const measure = (row, container) => {
+				const cr = container.getBoundingClientRect();
+				const rr = row.getBoundingClientRect();
+				let borderLeft = 0;
+				let borderTop = 0;
+				try {
+					const cs = getComputedStyle(container);
+					borderLeft = hlNum(cs.borderLeftWidth);
+					borderTop = hlNum(cs.borderTopWidth);
+				} catch (error) {
+					/* 忽略 */
+				}
+				return {
+					x: rr.left - cr.left - borderLeft + hlNum(container.scrollLeft),
+					y: rr.top - cr.top - borderTop + hlNum(container.scrollTop),
+					w: rr.width,
+					h: rr.height,
+				};
+			};
+
+			const paint = (slider, geo) => {
+				slider.style.width = `${geo.w}px`;
+				slider.style.height = `${geo.h}px`;
+				slider.style.transform = `translate3d(${geo.x}px, ${geo.y}px, 0)`;
+				slider.style.opacity = '1';
+			};
+
+			// 无动画落位：先关过渡写值，强制一帧后再恢复，避免从 (0,0) 飞过来。
+			const jump = (slider, geo) => {
+				slider.setAttribute('data-hl-anim', 'none');
+				paint(slider, geo);
+				void slider.offsetWidth;
+				slider.removeAttribute('data-hl-anim');
+			};
+
+			const place = (group, row) => {
+				const state = groups[group];
+				if (!state) return;
+				if (!row) {
+					if (state.slider) state.slider.style.opacity = '0';
+					state.row = null;
 					return;
 				}
+				const container = row.parentElement;
+				if (!container) return;
+				ensureContainer(container);
+				const slider = ensureSlider(state, container);
+				slider.setAttribute('data-deco', decoOf());
+				const geo = measure(row, container);
 
-				event.preventDefault();
-				event.stopPropagation();
+				const sameSpot = state.row === row && state.container === container;
+				const sameContainer = state.container === container && state.slider && state.slider.parentNode === container;
+				if (sameSpot) {
+					jump(slider, geo);
+					return;
+				}
+				if (sameContainer) {
+					paint(slider, geo); // 有过渡：这就是"组内平滑位移"
+				} else {
+					jump(slider, geo);
+				}
+				state.row = row;
+				state.container = container;
+			};
+
+			const sync = () => {
+				if (disposed) return;
+				let navRow = null;
+				let sessionRow = null;
 				try {
-					const transition = document.startViewTransition(() => {
-						replaying = true;
-						try {
-							row.click();
-						} finally {
-							replaying = false;
-						}
-						unmark(prev);
-						mark(row, group);
-					});
-					if (transition && transition.finished && typeof transition.finished.catch === 'function') {
-						transition.finished.catch(() => { /* 过渡被取消时保持最终状态 */ });
-					}
+					navRow = document.querySelector(HL_NAV_ACTIVE);
+					sessionRow = document.querySelector(HL_SESSION_ACTIVE);
 				} catch (error) {
-					// VT 起不来就退回普通点击，保证导航不受影响。
-					replaying = false;
-					row.click();
+					return;
+				}
+				if (groups[HL_GROUP_NAV].row !== navRow) place(HL_GROUP_NAV, navRow);
+				if (groups[HL_GROUP_SESSION].row !== sessionRow) place(HL_GROUP_SESSION, sessionRow);
+			};
+
+			const schedule = () => {
+				if (disposed || frame) return;
+				const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (fn) => setTimeout(fn, 16);
+				frame = raf(() => {
+					frame = 0;
+					sync();
+				});
+			};
+
+			// 滚动/改窗口大小：只重算位置，不做动画。
+			const reposition = () => {
+				for (const key of Object.keys(groups)) {
+					const state = groups[key];
+					if (!state.row || !state.container || !state.slider) continue;
+					try {
+						jump(state.slider, measure(state.row, state.container));
+					} catch (error) {
+						/* 行被移除时忽略 */
+					}
 				}
 			};
 
-			document.addEventListener('click', onClick, true);
+			let observer = null;
+			try {
+				if (typeof MutationObserver === 'function') {
+					observer = new MutationObserver(schedule);
+					observer.observe(document.documentElement, {
+						subtree: true,
+						childList: true,
+						attributes: true,
+						attributeFilter: ['class', 'aria-current', 'aria-selected'],
+					});
+				}
+			} catch (error) {
+				observer = null;
+			}
+
+			document.addEventListener('click', schedule, true);
+			document.addEventListener('scroll', reposition, true);
+			window.addEventListener('resize', reposition);
+
+			try {
+				document.documentElement.setAttribute(HL_READY_ATTR, '');
+			} catch (error) {
+				/* 属性写不了就只是样式让位不生效 */
+			}
+			sync();
+
 			return () => {
-				document.removeEventListener('click', onClick, true);
-				for (const row of marked) row.removeAttribute(HL_ATTR);
-				marked.clear();
+				disposed = true;
+				document.removeEventListener('click', schedule, true);
+				document.removeEventListener('scroll', reposition, true);
+				window.removeEventListener('resize', reposition);
+				if (observer) {
+					try { observer.disconnect(); } catch (error) { /* 忽略 */ }
+				}
+				for (const key of Object.keys(groups)) {
+					const state = groups[key];
+					if (state.slider && state.slider.parentNode) state.slider.parentNode.removeChild(state.slider);
+					state.slider = null;
+					state.row = null;
+					state.container = null;
+				}
+				for (const container of touchedContainers) {
+					try {
+						container.removeAttribute('data-dsh-hl-pos');
+						container.style.position = '';
+					} catch (error) {
+						/* 忽略 */
+					}
+				}
+				touchedContainers.clear();
+				try {
+					document.documentElement.removeAttribute(HL_READY_ATTR);
+				} catch (error) {
+					/* 忽略 */
+				}
+				if (frame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame);
 			};
 		}
 
@@ -1366,7 +1513,7 @@ html, body { overflow: hidden; height: 100%; }
 				}
 
 				// 侧边栏选中高亮动效：同组滑动、跨组淡入（200ms）。
-				ctx.effect(() => installHighlightMotion(ctx), 'appearance-styles: highlight motion');
+				ctx.effect(() => installHighlightSlider(ctx), 'appearance-styles: highlight slider');
 
 				ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
 					name: 'sidebar.panellist',
