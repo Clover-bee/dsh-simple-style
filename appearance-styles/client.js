@@ -996,6 +996,26 @@ body [data-sidebar-collapsed] [class*="sidebarCol"] [class*="panelRow"][class*="
    只留内部滚动容器。打印时恢复，避免只打印出第一屏。 */
 html, body { overflow: hidden; height: 100%; }
 @media print { html, body { overflow: visible; height: auto; } }
+
+/* 选中高亮动效：同组近距离滑动（View Transitions）、跨组或超距只淡入淡出。
+   两组各自一个 view-transition-name，靠 data-dsh-hl 属性挂在当前选中项上。 */
+[data-dsh-hl="nav"] { view-transition-name: dsh-hl-nav; }
+[data-dsh-hl="session"] { view-transition-name: dsh-hl-session; }
+[class*="panelRow"], [class*="sessionRow"] {
+  transition: background-color 200ms cubic-bezier(.22,.61,.36,1), box-shadow 200ms cubic-bezier(.22,.61,.36,1);
+}
+/* 只让两组高亮做动效，页面其余部分不参与快照交叉淡入，避免整页闪一下。 */
+::view-transition-old(root), ::view-transition-new(root) { animation: none; }
+::view-transition-group(dsh-hl-nav), ::view-transition-group(dsh-hl-session) {
+  animation-duration: 200ms;
+  animation-timing-function: cubic-bezier(.22,.61,.36,1);
+}
+@media (prefers-reduced-motion: reduce) {
+  [class*="panelRow"], [class*="sessionRow"] { transition: none !important; }
+  ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) {
+    animation-duration: 1ms !important;
+  }
+}
 `;
 
 		// ------------------------------------------------------ 样式表生命周期
@@ -1176,6 +1196,135 @@ html, body { overflow: hidden; height: 100%; }
 			);
 		}
 
+		// ------------------------------------------------- 选中高亮动效（同组滑动 / 跨组淡入）
+		// 两组各自一个 view-transition-name：nav＝全局面板导航，session＝工作区会话行。
+		// 只在"同组、且新旧选中行垂直距离 ≤ 240px"时才用 View Transitions 拦一次点击做位移
+		// morph；其余情况（跨组、超距、不支持 VT、减少动效）一律不拦，交给 CSS 的 200ms 淡入淡出。
+		const HL_ATTR = 'data-dsh-hl';
+		const HL_NAV_ROW = '[class*="sidebarCol"] [class*="panelList"] button[class*="panelRow"]';
+		const HL_SESSION_ROW = '[class*="sidebarCol"] [class*="regionArea"] [class*="sessionRow"]';
+		const HL_MAX_SLIDE = 240;
+
+		function hlGroupOf(row) {
+			if (!row || typeof row.matches !== 'function') return null;
+			if (row.matches(HL_NAV_ROW)) return 'nav';
+			if (row.matches(HL_SESSION_ROW)) return 'session';
+			return null;
+		}
+
+		function hlMotionEnabled() {
+			if (typeof document === 'undefined') return false;
+			if (typeof document.startViewTransition !== 'function') return false;
+			try {
+				if (typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches) return false;
+			} catch (error) {
+				/* matchMedia 不可用时按允许处理 */
+			}
+			return true;
+		}
+
+		function hlSlideDistanceOk(from, to) {
+			try {
+				const a = from.getBoundingClientRect();
+				const b = to.getBoundingClientRect();
+				const distance = Math.abs((a.top + a.height / 2) - (b.top + b.height / 2));
+				return Number.isFinite(distance) && distance <= HL_MAX_SLIDE;
+			} catch (error) {
+				return false;
+			}
+		}
+
+		/**
+		 * 安装侧边栏选中高亮的过渡：
+		 * - 同组近距离：捕获阶段拦下 click，用 startViewTransition 包住宿主的状态更新再转发点击；
+		 * - 其余情况直接放行，由 CSS 过渡完成淡入淡出。
+		 * @param ctx - 插件上下文（只用 ctx.effect 管理生命周期）
+		 * @returns 清理函数
+		 */
+		function installHighlightMotion(ctx) {
+			if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') {
+				return () => {};
+			}
+
+			let replaying = false;
+			const marked = new Set();
+
+			const mark = (row, group) => {
+				if (!row || !group) return;
+				row.setAttribute(HL_ATTR, group);
+				marked.add(row);
+			};
+			const unmark = (row) => {
+				if (!row) return;
+				row.removeAttribute(HL_ATTR);
+				marked.delete(row);
+			};
+
+			// 启动时把当前选中项标好，否则第一次同组切换拿不到"旧位置"。
+			try {
+				const activeNav = document.querySelector(`${HL_NAV_ROW}[class*="panelActive"]`);
+				if (activeNav) mark(activeNav, 'nav');
+				const activeSession = document.querySelector(`${HL_SESSION_ROW}[class*="selected"]`);
+				if (activeSession) mark(activeSession, 'session');
+			} catch (error) {
+				/* 初始标记失败不影响点击 */
+			}
+
+			const onClick = (event) => {
+				if (replaying) return;
+				const target = event.target;
+				if (!target || typeof target.closest !== 'function') return;
+				const row = target.closest(`${HL_NAV_ROW}, ${HL_SESSION_ROW}`);
+				if (!row) return;
+				const group = hlGroupOf(row);
+				if (!group) return;
+
+				let prev = null;
+				try {
+					prev = document.querySelector(`[${HL_ATTR}="${group}"]`);
+				} catch (error) {
+					prev = null;
+				}
+				if (prev === row) return; // 点的是当前项，无事可做
+
+				const canSlide = prev !== null && hlMotionEnabled() && hlSlideDistanceOk(prev, row);
+				if (!canSlide) {
+					// 跨组 / 超距 / 不支持 VT：放行点击，只更新标记，靠 CSS 淡入淡出。
+					mark(row, group);
+					return;
+				}
+
+				event.preventDefault();
+				event.stopPropagation();
+				try {
+					const transition = document.startViewTransition(() => {
+						replaying = true;
+						try {
+							row.click();
+						} finally {
+							replaying = false;
+						}
+						unmark(prev);
+						mark(row, group);
+					});
+					if (transition && transition.finished && typeof transition.finished.catch === 'function') {
+						transition.finished.catch(() => { /* 过渡被取消时保持最终状态 */ });
+					}
+				} catch (error) {
+					// VT 起不来就退回普通点击，保证导航不受影响。
+					replaying = false;
+					row.click();
+				}
+			};
+
+			document.addEventListener('click', onClick, true);
+			return () => {
+				document.removeEventListener('click', onClick, true);
+				for (const row of marked) row.removeAttribute(HL_ATTR);
+				marked.clear();
+			};
+		}
+
 		// ------------------------------------------------------ 插件出口
 		return {
 			inject: ['slots', 'locale'],
@@ -1215,6 +1364,9 @@ html, body { overflow: hidden; height: 100%; }
 						/* 没有依赖注入通道时，样式表已经足够。 */
 					}
 				}
+
+				// 侧边栏选中高亮动效：同组滑动、跨组淡入（200ms）。
+				ctx.effect(() => installHighlightMotion(ctx), 'appearance-styles: highlight motion');
 
 				ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
 					name: 'sidebar.panellist',
